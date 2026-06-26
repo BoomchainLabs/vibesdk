@@ -12,7 +12,9 @@ import { ApiKeyService } from './ApiKeyService';
 import { PasswordService } from '../../utils/passwordService';
 import { GoogleOAuthProvider } from '../../services/oauth/google';
 import { GitHubOAuthProvider } from '../../services/oauth/github';
+import { CloudflareConnectOAuthProvider } from '../../services/oauth/cloudflare-connect';
 import { BaseOAuthProvider } from '../../services/oauth/base';
+import { readOAuthNonceCookie } from '../../utils/oauthCookie';
 import { 
     SecurityError, 
     SecurityErrorType 
@@ -273,6 +275,8 @@ export class AuthService extends BaseService {
                 return GoogleOAuthProvider.create(this.env, url);
             case 'github':
                 return GitHubOAuthProvider.create(this.env, url);
+            case 'cloudflare':
+                return CloudflareConnectOAuthProvider.createForLogin(this.env, url);
             default:
                 throw new SecurityError(
                     SecurityErrorType.INVALID_INPUT,
@@ -289,7 +293,7 @@ export class AuthService extends BaseService {
         provider: OAuthProvider,
         request: Request,
         intendedRedirectUrl?: string
-    ): Promise<string> {
+    ): Promise<{ authUrl: string; nonce: string }> {
         const oauthProvider = await this.getOauthProvider(provider, request);
         if (!oauthProvider) {
             throw new SecurityError(
@@ -313,6 +317,12 @@ export class AuthService extends BaseService {
         
         // Generate PKCE code verifier
         const codeVerifier = BaseOAuthProvider.generateCodeVerifier();
+
+        // Generate a nonce that binds this state to the initiating browser. It is
+        // stored here and also set as an HttpOnly cookie by the controller; the
+        // callback rejects any request whose cookie nonce does not match. This is
+        // the core defense against login CSRF / session fixation.
+        const nonce = generateSecureToken();
         
         // Store OAuth state with intended redirect URL
         await this.database.insert(schema.oauthStates).values({
@@ -326,7 +336,7 @@ export class AuthService extends BaseService {
             isUsed: false,
             scopes: [],
             userId: null,
-            nonce: null
+            nonce
         });
         
         // Get authorization URL
@@ -334,7 +344,7 @@ export class AuthService extends BaseService {
         
         logger.info('OAuth authorization initiated', { provider });
         
-        return authUrl;
+        return { authUrl, nonce };
     }
     
     /**
@@ -398,6 +408,23 @@ export class AuthService extends BaseService {
                     400
                 );
             }
+
+            // Bind the state to the initiating browser via the nonce cookie. A callback
+            // replayed in a different browser (login CSRF / session fixation) will not
+            // carry the matching nonce and is rejected here.
+            const cookieNonce = readOAuthNonceCookie(request, this.env);
+            if (!oauthState.nonce || !cookieNonce || cookieNonce !== oauthState.nonce) {
+                logger.warn('OAuth callback nonce mismatch - possible login CSRF', {
+                    provider,
+                    hasStoredNonce: !!oauthState.nonce,
+                    hasCookieNonce: !!cookieNonce,
+                });
+                throw new SecurityError(
+                    SecurityErrorType.CSRF_VIOLATION,
+                    'Invalid or expired OAuth state',
+                    400
+                );
+            }
             
             // Mark state as used
             await this.database
@@ -433,7 +460,10 @@ export class AuthService extends BaseService {
                 accessToken: sessionAccessToken,
                 sessionId: session.sessionId,
                 expiresAt: session.expiresAt,
-                redirectUrl: oauthState.redirectUri || undefined
+                redirectUrl: oauthState.redirectUri || undefined,
+                // Surface raw provider tokens only for Cloudflare so the controller can
+                // best-effort auto-connect the AI Gateway in the same round-trip.
+                oauthTokens: provider === 'cloudflare' ? tokens : undefined,
             };
         } catch (error) {
             await this.logAuthAttempt('', `oauth_${provider}`, false, request);
@@ -526,7 +556,7 @@ export class AuthService extends BaseService {
             
             await this.database.insert(schema.authAttempts).values({
                 identifier: identifier.toLowerCase(),
-                attemptType: attemptType as 'login' | 'register' | 'oauth_google' | 'oauth_github' | 'refresh' | 'reset_password',
+                attemptType: attemptType as 'login' | 'register' | 'oauth_google' | 'oauth_github' | 'oauth_cloudflare' | 'refresh' | 'reset_password',
                 success: success,
                 ipAddress: requestMetadata.ipAddress
             });
