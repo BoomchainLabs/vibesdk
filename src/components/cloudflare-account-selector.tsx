@@ -13,7 +13,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { toast } from 'sonner';
 import { apiClient } from '@/lib/api-client';
 import CloudflareLogo from '@/assets/provider-logos/cloudflare.svg?react';
-import { Loader2, CheckCircle2, AlertCircle, MoreVertical, ExternalLink, LogOut } from 'lucide-react';
+import { Loader2, CheckCircle2, AlertCircle, MoreVertical, ExternalLink, LogOut, RefreshCw } from 'lucide-react';
 import { useLimitsContext } from '@/contexts/limits-context';
 
 interface CloudflareAccount {
@@ -47,6 +47,7 @@ export function CloudflareAccountSelector() {
 	const [accounts, setAccounts] = useState<CloudflareAccount[]>([]);
 	const [loading, setLoading] = useState(true);
 	const [saving, setSaving] = useState(false);
+	const [refreshing, setRefreshing] = useState(false);
 	const [selectedAccountId, setSelectedAccountId] = useState<string>('');
 	const [selectedGatewayId, setSelectedGatewayId] = useState<string>('');
 	const [availableGateways, setAvailableGateways] = useState<Gateway[]>([]);
@@ -90,12 +91,19 @@ export function CloudflareAccountSelector() {
 		fetchAccounts();
 	}, []);
 
-	const fetchAccounts = async () => {
+	const fetchAccounts = async ({ refresh = false }: { refresh?: boolean } = {}) => {
 		try {
-			setLoading(true);
-			const response = await fetch('/api/cloudflare/accounts', {
-				credentials: 'include',
-			});
+			if (refresh) {
+				setRefreshing(true);
+			} else {
+				setLoading(true);
+			}
+			const response = await fetch(
+				`/api/cloudflare/accounts${refresh ? '?refresh=true' : ''}`,
+				{
+					credentials: 'include',
+				},
+			);
 
 			if (!response.ok) {
 				throw new Error('Failed to fetch accounts');
@@ -138,7 +146,13 @@ export function CloudflareAccountSelector() {
 			toast.error('Failed to load Cloudflare accounts');
 		} finally {
 			setLoading(false);
+			setRefreshing(false);
 		}
+	};
+
+	const handleRefresh = async () => {
+		await fetchAccounts({ refresh: true });
+		toast.success('Refreshed Cloudflare accounts and gateways');
 	};
 
 	// Update available gateways when account changes
@@ -267,6 +281,18 @@ export function CloudflareAccountSelector() {
 								<AlertCircle className="w-3.5 h-3.5 text-amber-500" />
 								<span className="text-amber-600 dark:text-amber-400">Not connected</span>
 							</div>
+						)}
+						{isConnected && (
+							<Button
+								variant="ghost"
+								size="icon"
+								className="h-7 w-7"
+								onClick={handleRefresh}
+								disabled={refreshing}
+								title="Refresh accounts and gateways"
+							>
+								<RefreshCw className={`h-4 w-4 ${refreshing ? 'animate-spin' : ''}`} />
+							</Button>
 						)}
 						{isConnected && (
 							<DropdownMenu>

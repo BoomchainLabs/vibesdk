@@ -6,19 +6,26 @@
 import { BaseController } from '../baseController';
 import { RouteContext } from '../../types/route-context';
 import { CloudflareAccountService } from '../../../services/cloudflare/CloudflareAccountService';
+import { CloudflareProvisioningService } from '../../../services/cloudflare/CloudflareProvisioningService';
 import { UserService } from '../../../database/services/UserService';
 import { createLogger } from '../../../logger';
 import { buildClearTokenCookie } from '../../../utils/oauthCookie';
+import { resolveCloudflareAccessTokenFromRequest } from '../../../services/rate-limit/usageChecker';
 
 export class CloudflareAccountController extends BaseController {
 	static logger = createLogger('CloudflareAccountController');
 
 	/**
 	 * GET /api/cloudflare/accounts
-	 * Get all user's Cloudflare accounts with their gateways
+	 * Get all user's Cloudflare accounts with their gateways.
+	 *
+	 * When called with `?refresh=true`, re-fetches accounts/gateways from the
+	 * Cloudflare API (using the stored OAuth token) and persists them before
+	 * returning, so gateways created on Cloudflare after the initial connect
+	 * show up without needing to disconnect/reconnect.
 	 */
 	static async getAccounts(
-		_request: Request,
+		request: Request,
 		env: Env,
 		_ctx: ExecutionContext,
 		context: RouteContext,
@@ -32,10 +39,31 @@ export class CloudflareAccountController extends BaseController {
 		}
 
 		try {
+			const shouldRefresh = new URL(request.url).searchParams.get('refresh') === 'true';
+			let refreshedCookie: string | undefined;
+
+			if (shouldRefresh) {
+				const { accessToken, refreshedCookie: cookie } =
+					await resolveCloudflareAccessTokenFromRequest(env, user.id, request);
+				refreshedCookie = cookie;
+
+				if (accessToken) {
+					// Re-provision from Cloudflare. This adds newly-created gateways and
+					// updates metadata without touching the user's active selection when
+					// they already have gateways.
+					const provisioning = new CloudflareProvisioningService(env);
+					await provisioning.provisionFromToken(accessToken, user.id);
+				}
+			}
+
 			const accountService = new CloudflareAccountService(env);
 			const accounts = await accountService.getUserAccountsWithGateways(user.id);
 
-			return CloudflareAccountController.createSuccessResponse(accounts);
+			const response = CloudflareAccountController.createSuccessResponse(accounts);
+			if (refreshedCookie) {
+				response.headers.append('Set-Cookie', refreshedCookie);
+			}
+			return response;
 		} catch (error) {
 			this.logger.error('Error getting user accounts', error);
 			return CloudflareAccountController.createErrorResponse(

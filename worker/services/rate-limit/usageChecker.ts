@@ -186,6 +186,46 @@ export async function checkUsageAndBalance(
 }
 
 /**
+ * Resolve a usable Cloudflare access token from the request's HttpOnly cookie.
+ *
+ * Reuses the same decrypt/validate/refresh path as usage checking so callers
+ * (e.g. refreshing the account/gateway list on demand) get a live token without
+ * duplicating that logic. Returns a `refreshedCookie` the caller MUST echo as a
+ * `Set-Cookie` header when the token was transparently refreshed or when a bad
+ * cookie should be cleared.
+ */
+export async function resolveCloudflareAccessTokenFromRequest(
+	env: Env,
+	userId: string,
+	request: Request,
+): Promise<{ accessToken: string | null; refreshedCookie?: string }> {
+	if (!isCloudflareGatewayLimitsEnabled(env)) {
+		return { accessToken: null };
+	}
+
+	const blob = extractCloudflareToken(request, env);
+	if (!blob) {
+		return { accessToken: null };
+	}
+
+	const resolved = await resolveAccessToken(env, userId, blob, request);
+	if (resolved.accessToken) {
+		return {
+			accessToken: resolved.accessToken,
+			refreshedCookie: resolved.refreshedBlob
+				? buildTokenCookie(env, resolved.refreshedBlob)
+				: undefined,
+		};
+	}
+
+	if (resolved.clearCookie) {
+		return { accessToken: null, refreshedCookie: buildClearTokenCookie(env) };
+	}
+
+	return { accessToken: null };
+}
+
+/**
  * Decrypt the stored blob, validate user binding, and refresh the access token
  * if it is past the refresh threshold. Returns the usable access token plus an
  * optional new encrypted blob when refresh happened. `clearCookie: true` signals
